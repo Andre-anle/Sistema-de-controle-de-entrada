@@ -1,0 +1,8 @@
+{
+  "printer": "Zebra",
+  "font_name": "arial.ttf",
+  "font_size": 20,
+  "remote_enabled": true,
+  "remote_port": 8765,
+  "remote_token": "wkEGUmX53niA"
+}
