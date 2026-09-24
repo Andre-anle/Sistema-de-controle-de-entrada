@@ -2,7 +2,6 @@ import sqlite3
 import sys
 import ssl
 from dataclasses import replace
-ssl._create_default_https_context = ssl._create_unverified_context
 
 import flet as ft
 
@@ -12,18 +11,25 @@ from print_label import imprimir_etiquetas_produto, impressora_padrao
 from remote_access import aplicar_acesso_remoto, gerar_chave, parar_servidor
 from settings import carregar_config, salvar_config
 from ui_base import (
+    BORDA,
+    CARTAO,
+    CREME,
     LARANJA,
+    TEXTO,
     TEXTO_SUAVE,
     VERDE,
+    VERDE_FOLHA,
+    VERDE_SUAVE,
     CampoTexto,
     abrir_dialogo,
     agora_texto,
     aplicar_tema,
+    cabecalho_cartao,
     estilo_campo,
     estilo_cartao,
     fechar_dialogo,
+    icone_destaque,
     mostrar_snack,
-    titulo_secao,
 )
 from ui_config import ConfigMixin
 from ui_consulta import ConsultaMixin
@@ -66,156 +72,217 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
             ft.Icons.QR_CODE_2,
             on_escolha=self._ao_selecionar_ean,
             on_enter=lambda: self.descricao.campo.focus(),
+            largura=None,
         )
+        self.ean.campo.autofocus = True
         self.descricao = CampoTexto(
             "Descrição do produto",
             ft.Icons.INVENTORY_2_OUTLINED,
             on_enter=lambda: self.colaborador.campo.focus(),
+            largura=None,
         )
         self.colaborador = CampoTexto(
             "Nome do colaborador",
             ft.Icons.PERSON_OUTLINE,
             on_enter=self.gerar_etiqueta,
+            largura=None,
         )
 
         formulario = ft.Container(
-            **estilo_cartao(),
+            **estilo_cartao(28),
             content=ft.Column(
                 [
-                    titulo_secao("Nova etiqueta"),
+                    cabecalho_cartao(
+                        ft.Icons.LOCAL_OFFER_OUTLINED,
+                        "Nova etiqueta",
+                        "Bipe o código de barras ou preencha os dados do produto.",
+                    ),
+                    ft.Divider(height=1, color=BORDA),
                     self.ean.view,
                     self.descricao.view,
                     self.colaborador.view,
-                    ft.Container(height=8),
                     ft.Row(
-                        controls=[
+                        [
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.KEYBOARD_RETURN, size=16, color=TEXTO_SUAVE),
+                                    ft.Text(
+                                        "Enter avança para o próximo campo",
+                                        size=12,
+                                        color=TEXTO_SUAVE,
+                                    ),
+                                ],
+                                spacing=6,
+                                expand=True,
+                            ),
                             ft.FilledButton(
                                 "Gerar etiqueta",
                                 icon=ft.Icons.PRINT,
                                 bgcolor=VERDE,
+                                height=48,
+                                style=ft.ButtonStyle(
+                                    padding=ft.Padding.symmetric(horizontal=28),
+                                    shape=ft.RoundedRectangleBorder(radius=14),
+                                    text_style=ft.TextStyle(size=15, weight=ft.FontWeight.W_600),
+                                ),
                                 on_click=lambda _: self.gerar_etiqueta(),
                             ),
-                            ft.OutlinedButton(
-                                "Consultar entradas",
-                                icon=ft.Icons.SEARCH,
-                                on_click=lambda _: self.consulta_entradas_dialog(),
-                            ),
-                            ft.OutlinedButton(
-                                "Visitante",
-                                icon=ft.Icons.PERSON_ADD_ALT,
-                                on_click=lambda _: self.adicionar_visitante_dialog(),
-                            ),
-                            ft.OutlinedButton(
-                                "Impressora",
-                                icon=ft.Icons.SETTINGS_OUTLINED,
-                                on_click=lambda _: self.abrir_dialogo_configuracao(),
-                            ),
                         ],
-                        wrap=True,
-                        spacing=10,
-                        run_spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                 ],
-                spacing=14,
+                spacing=16,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
+        )
+
+        atalhos = ft.Row(
+            [
+                self._atalho(
+                    ft.Icons.PERSON_ADD_ALT,
+                    "Registrar visitante",
+                    "Imprime o crachá e marca a entrada",
+                    self.adicionar_visitante_dialog,
+                    cor=LARANJA,
+                    fundo="#FBEBDD",
+                ),
+                self._atalho(
+                    ft.Icons.MANAGE_SEARCH,
+                    "Consultar entradas",
+                    "Pesquise e exporte para Excel",
+                    self.consulta_entradas_dialog,
+                ),
+                self._atalho(
+                    ft.Icons.SETTINGS_OUTLINED,
+                    "Impressora e rede",
+                    "Configure impressora e acesso remoto",
+                    self.abrir_dialogo_configuracao,
+                ),
+            ],
+            spacing=16,
         )
 
         conteudo = ft.Column(
             expand=True,
             scroll=ft.ScrollMode.AUTO,
-            spacing=18,
-            controls=[
-                ft.Row(
-                    [
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    "HORTIFRUTI NATURAL DA TERRA",
-                                    size=13,
-                                    weight=ft.FontWeight.W_600,
-                                    color=LARANJA,
-                                ),
-                                ft.Text(
-                                    "Controle de etiquetas",
-                                    size=32,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=VERDE,
-                                ),
-                                ft.Text(
-                                    "Controle de entrada de mercadorias e visitantes.",
-                                    size=15,
-                                    color=TEXTO_SUAVE,
-                                ),
-                                self._texto_remoto(),
-                            ],
-                            spacing=6,
-                            expand=True,
-                        ),
-                        self._logo(),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                formulario,
-                ft.Container(height=28),
-            ],
+            spacing=20,
+            controls=[formulario, atalhos],
         )
 
-        credito = ft.Text(
-            "Feito por: André luiz",
-            size=12,
-            italic=True,
-            color=TEXTO_SUAVE,
-            right=16,
-            bottom=10,
+        corpo = ft.Container(
+            expand=True,
+            padding=ft.Padding.only(left=28, top=24, right=28, bottom=8),
+            content=ft.Row(
+                expand=True,
+                spacing=24,
+                vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                controls=[conteudo, self._painel_visitantes()],
+            ),
         )
 
-        painel_visitantes = ft.Container(
-            padding=ft.Padding.only(top=28, right=28, bottom=28),
-            content=ft.Column(
-                [self._painel_visitantes()],
-                alignment=ft.MainAxisAlignment.CENTER,
+        rodape = ft.Container(
+            padding=ft.Padding.only(right=28, bottom=10),
+            content=ft.Row(
+                [ft.Text("Feito por: André luiz", size=12, italic=True, color=TEXTO_SUAVE)],
+                alignment=ft.MainAxisAlignment.END,
             ),
         )
 
         page.add(
-            ft.Stack(
+            ft.Column(
                 expand=True,
-                controls=[
-                    ft.Row(
-                        expand=True,
-                        spacing=0,
-                        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                        controls=[
-                            ft.Container(expand=True, padding=28, content=conteudo),
-                            painel_visitantes,
-                        ],
-                    ),
-                    credito,
-                ],
+                spacing=0,
+                controls=[self._barra_superior(), corpo, rodape],
             )
         )
         self._aplicar_acesso_remoto(avisar=False)
 
-    def _texto_remoto(self) -> ft.Text:
-        self.rotulo_remoto = ft.Text(
-            self._mensagem_remoto(),
-            size=13,
-            color=VERDE if self.config.remote_enabled else TEXTO_SUAVE,
-            selectable=True,
+    def _barra_superior(self) -> ft.Control:
+        return ft.Container(
+            bgcolor=CARTAO,
+            padding=ft.Padding.symmetric(horizontal=28, vertical=12),
+            shadow=ft.BoxShadow(blur_radius=12, color="#1F6B3A18", offset=ft.Offset(0, 2)),
+            content=ft.Row(
+                [
+                    self._logo(),
+                    ft.Container(width=1, height=44, bgcolor=BORDA),
+                    ft.Column(
+                        [
+                            ft.Text(
+                                "Controle de etiquetas",
+                                size=22,
+                                weight=ft.FontWeight.BOLD,
+                                color=VERDE,
+                            ),
+                            ft.Text(
+                                "Entrada de mercadorias e visitantes",
+                                size=13,
+                                color=TEXTO_SUAVE,
+                            ),
+                        ],
+                        spacing=0,
+                        expand=True,
+                    ),
+                    self._chip_remoto(),
+                ],
+                spacing=20,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
-        return self.rotulo_remoto
 
-    def _mensagem_remoto(self) -> str:
-        if not self.config.remote_enabled:
-            return "Acesso remoto desligado. Ative em Impressora para consultar pela rede."
-        return "Acesso remoto ativo"
+    def _atalho(self, icone, titulo: str, descricao: str, acao, *, cor=VERDE, fundo=VERDE_SUAVE) -> ft.Control:
+        return ft.Container(
+            **estilo_cartao(20),
+            expand=True,
+            ink=True,
+            on_click=lambda _: acao(),
+            content=ft.Row(
+                [
+                    icone_destaque(icone, cor, fundo),
+                    ft.Column(
+                        [
+                            ft.Text(titulo, size=15, weight=ft.FontWeight.W_600, color=TEXTO),
+                            ft.Text(descricao, size=12, color=TEXTO_SUAVE),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.Icon(ft.Icons.CHEVRON_RIGHT, color=TEXTO_SUAVE),
+                ],
+                spacing=14,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+    def _chip_remoto(self) -> ft.Control:
+        self.rotulo_remoto = ft.Text(size=13, weight=ft.FontWeight.W_500)
+        self.ponto_remoto = ft.Container(width=8, height=8, border_radius=4)
+        self.chip_remoto = ft.Container(
+            border_radius=20,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+            ink=True,
+            on_click=lambda _: self.abrir_dialogo_configuracao(),
+            content=ft.Row([self.ponto_remoto, self.rotulo_remoto], spacing=8, tight=True),
+        )
+        self._estilizar_chip_remoto()
+        return self.chip_remoto
+
+    def _estilizar_chip_remoto(self) -> None:
+        ativo = self.config.remote_enabled
+        self.rotulo_remoto.value = "Acesso remoto ativo" if ativo else "Acesso remoto desligado"
+        self.rotulo_remoto.color = VERDE if ativo else TEXTO_SUAVE
+        self.ponto_remoto.bgcolor = VERDE_FOLHA if ativo else "#A7B3A9"
+        self.chip_remoto.bgcolor = VERDE_SUAVE if ativo else CREME
+        self.chip_remoto.tooltip = (
+            "Outros computadores da loja podem consultar pela rede"
+            if ativo
+            else "Clique para ativar a consulta pela rede"
+        )
 
     def _atualizar_rotulo_remoto(self) -> None:
-        if hasattr(self, "rotulo_remoto"):
-            self.rotulo_remoto.value = self._mensagem_remoto()
-            self.rotulo_remoto.color = VERDE if self.config.remote_enabled else TEXTO_SUAVE
-            self.rotulo_remoto.update()
+        if hasattr(self, "chip_remoto"):
+            self._estilizar_chip_remoto()
+            self.chip_remoto.update()
 
     def _aplicar_acesso_remoto(self, *, avisar: bool) -> None:
         erro = aplicar_acesso_remoto(
@@ -242,11 +309,11 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
         if LOGO_PATH.is_file():
             return ft.Image(
                 src=str(LOGO_PATH),
-                width=420,
-                height=210,
+                width=180,
+                height=64,
                 fit=ft.BoxFit.CONTAIN,
             )
-        return ft.Container(width=420, height=210)
+        return ft.Container(width=180, height=64)
 
     def _ao_selecionar_ean(self, ean: str) -> None:
         registro = db.ultimo_por_ean(ean)
@@ -324,6 +391,7 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
                 self.colaborador.value = ""
                 self.page.update()
                 mostrar_snack(self.page, f"{quantidade} etiqueta(s) criadas com sucesso!")
+                await self.ean.campo.focus()
 
             self.page.run_task(concluir)
 

@@ -7,6 +7,7 @@ import db
 from print_label import imprimir_etiqueta_visitante
 from settings import AppSettings
 from ui_base import (
+    BORDA,
     ESPACO_CARTAO,
     LARANJA,
     TEXTO,
@@ -20,8 +21,8 @@ from ui_base import (
     estilo_cartao,
     fechar_dialogo,
     formatar_data_hora_exibicao,
+    icone_destaque,
     mostrar_snack,
-    titulo_secao,
 )
 
 
@@ -30,11 +31,11 @@ class VisitantesMixin:
     config: AppSettings
 
     def _painel_visitantes(self) -> ft.Control:
-        self.contador_ativos = ft.Text("", size=13, color=TEXTO_SUAVE)
+        self.contador_ativos = ft.Text("", size=12, weight=ft.FontWeight.W_700, color="#FFFFFF")
         self.lista_ativos = ft.Column(
             spacing=10,
             scroll=ft.ScrollMode.AUTO,
-            height=420,
+            expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
         self._preencher_visitantes_ativos()
@@ -47,43 +48,92 @@ class VisitantesMixin:
                         padding=ft.Padding.symmetric(horizontal=ESPACO_CARTAO),
                         content=ft.Row(
                             [
-                                ft.Column(
+                                icone_destaque(ft.Icons.GROUPS_OUTLINED),
+                                ft.Row(
                                     [
-                                        titulo_secao("Visitantes ativos"),
-                                        self.contador_ativos,
+                                        ft.Text(
+                                            "Visitantes",
+                                            size=17,
+                                            weight=ft.FontWeight.W_700,
+                                            color=TEXTO,
+                                        ),
+                                        ft.Container(
+                                            bgcolor=VERDE,
+                                            border_radius=10,
+                                            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                                            content=self.contador_ativos,
+                                            tooltip="Visitantes na loja agora",
+                                        ),
                                     ],
-                                    spacing=2,
+                                    spacing=8,
                                     expand=True,
                                 ),
                                 ft.IconButton(
                                     icon=ft.Icons.REFRESH,
-                                    icon_color=VERDE,
+                                    icon_color=TEXTO_SUAVE,
                                     tooltip="Atualizar",
                                     on_click=lambda _: self._atualizar_visitantes_ativos(),
                                 ),
+                                ft.IconButton(
+                                    icon=ft.Icons.PERSON_ADD_ALT,
+                                    icon_color=VERDE,
+                                    tooltip="Registrar visitante",
+                                    on_click=lambda _: self.adicionar_visitante_dialog(),
+                                ),
                             ],
+                            spacing=10,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                     ),
+                    ft.Divider(height=1, color=BORDA),
                     self.lista_ativos,
                 ],
                 spacing=14,
-                tight=True,
             ),
         )
 
     def _preencher_visitantes_ativos(self) -> None:
         ativos = db.listar_visitantes_ativos()
-        self.contador_ativos.value = f"{len(ativos)} no momento"
-        itens = (
-            [self._cartao_visitante(visitante) for visitante in ativos]
-            if ativos
-            else [ft.Text("Nenhum visitante no momento.", color=TEXTO_SUAVE)]
+        self.contador_ativos.value = str(len(ativos))
+        if ativos:
+            self.lista_ativos.alignment = ft.MainAxisAlignment.START
+            self.lista_ativos.controls = [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=ESPACO_CARTAO),
+                    content=self._cartao_visitante(visitante),
+                )
+                for visitante in ativos
+            ]
+        else:
+            self.lista_ativos.alignment = ft.MainAxisAlignment.CENTER
+            self.lista_ativos.controls = [self._sem_visitantes()]
+
+    def _sem_visitantes(self) -> ft.Control:
+        return ft.Column(
+            [
+                ft.Icon(ft.Icons.EMOJI_PEOPLE, size=56, color=BORDA),
+                ft.Text(
+                    "Nenhum visitante na loja",
+                    size=15,
+                    weight=ft.FontWeight.W_600,
+                    color=TEXTO,
+                ),
+                ft.Text(
+                    "Quem entrar aparece aqui até\nregistrar a saída.",
+                    size=13,
+                    color=TEXTO_SUAVE,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=4),
+                ft.OutlinedButton(
+                    "Registrar visitante",
+                    icon=ft.Icons.PERSON_ADD_ALT,
+                    on_click=lambda _: self.adicionar_visitante_dialog(),
+                ),
+            ],
+            spacing=6,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        self.lista_ativos.controls = [
-            ft.Container(padding=ft.Padding.symmetric(horizontal=ESPACO_CARTAO), content=item)
-            for item in itens
-        ]
 
     def _atualizar_visitantes_ativos(self) -> None:
         self._preencher_visitantes_ativos()
@@ -91,34 +141,67 @@ class VisitantesMixin:
         self.lista_ativos.update()
 
     def _cartao_visitante(self, visitante) -> ft.Control:
-        detalhes = [f"{visitante['empresa']} · {visitante['funcao']}"]
+        detalhes = [
+            (ft.Icons.APARTMENT, f"{visitante['empresa']} · {visitante['funcao']}"),
+        ]
         if visitante["documento"]:
-            detalhes.append(f"Documento: {visitante['documento']}")
+            detalhes.append((ft.Icons.BADGE_OUTLINED, visitante["documento"]))
         if visitante["autorizado_por"]:
-            detalhes.append(f"Autorizado por: {visitante['autorizado_por']}")
-        detalhes.append(f"Entrada: {formatar_data_hora_exibicao(visitante['entrada'])}")
+            detalhes.append((ft.Icons.VERIFIED_USER_OUTLINED, f"Autorizado por {visitante['autorizado_por']}"))
+        detalhes.append((ft.Icons.LOGIN, f"Entrada {formatar_data_hora_exibicao(visitante['entrada'])}"))
+        nome = str(visitante["nome"])
         return ft.Container(
             bgcolor=VERDE_SUAVE,
-            border_radius=14,
-            padding=12,
+            border_radius=16,
+            padding=14,
             content=ft.Column(
                 [
-                    ft.Text(
-                        visitante["nome"],
-                        size=15,
-                        weight=ft.FontWeight.W_600,
-                        color=TEXTO,
+                    ft.Row(
+                        [
+                            ft.CircleAvatar(
+                                content=ft.Text(
+                                    nome[:1].upper(),
+                                    weight=ft.FontWeight.W_700,
+                                    color="#FFFFFF",
+                                ),
+                                bgcolor=VERDE,
+                                radius=18,
+                            ),
+                            ft.Text(
+                                nome,
+                                size=15,
+                                weight=ft.FontWeight.W_600,
+                                color=TEXTO,
+                                expand=True,
+                                max_lines=2,
+                            ),
+                        ],
+                        spacing=10,
                     ),
-                    *[ft.Text(linha, size=12, color=TEXTO_SUAVE) for linha in detalhes],
-                    ft.FilledButton(
+                    *[
+                        ft.Row(
+                            [
+                                ft.Icon(icone, size=14, color=TEXTO_SUAVE),
+                                ft.Text(texto, size=12, color=TEXTO_SUAVE, expand=True),
+                            ],
+                            spacing=6,
+                        )
+                        for icone, texto in detalhes
+                    ],
+                    ft.Container(height=2),
+                    ft.OutlinedButton(
                         "Dar saída",
                         icon=ft.Icons.LOGOUT,
-                        bgcolor=LARANJA,
-                        color="#FFFFFF",
+                        style=ft.ButtonStyle(
+                            color=LARANJA,
+                            side=ft.BorderSide(1, LARANJA),
+                            shape=ft.RoundedRectangleBorder(radius=12),
+                        ),
                         on_click=lambda _, v=visitante: self._confirmar_saida(v),
                     ),
                 ],
-                spacing=4,
+                spacing=6,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
 

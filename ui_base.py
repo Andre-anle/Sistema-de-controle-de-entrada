@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from collections.abc import Callable
 from datetime import datetime
 
@@ -44,6 +45,34 @@ def estilo_cartao(padding=ESPACO_CARTAO) -> dict:
 
 def titulo_secao(texto: str) -> ft.Text:
     return ft.Text(texto, size=16, weight=ft.FontWeight.W_600, color=VERDE)
+
+
+def icone_destaque(icone, cor: str = VERDE, fundo: str = VERDE_SUAVE, tamanho: int = 44) -> ft.Container:
+    return ft.Container(
+        width=tamanho,
+        height=tamanho,
+        border_radius=tamanho * 0.3,
+        bgcolor=fundo,
+        alignment=ft.Alignment.CENTER,
+        content=ft.Icon(icone, color=cor, size=tamanho * 0.5),
+    )
+
+
+def cabecalho_cartao(icone, titulo: str, subtitulo: str, acao: ft.Control | None = None) -> ft.Row:
+    controles: list[ft.Control] = [
+        icone_destaque(icone),
+        ft.Column(
+            [
+                ft.Text(titulo, size=17, weight=ft.FontWeight.W_700, color=TEXTO),
+                ft.Text(subtitulo, size=13, color=TEXTO_SUAVE),
+            ],
+            spacing=2,
+            expand=True,
+        ),
+    ]
+    if acao is not None:
+        controles.append(acao)
+    return ft.Row(controles, spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
 
 def aplicar_tema(page: ft.Page) -> None:
@@ -107,7 +136,7 @@ def abrir_dialogo(
     return dialogo
 
 
-def estilo_campo(largura: int = 420, icone=None) -> dict:
+def estilo_campo(largura: int | None = 420, icone=None) -> dict:
     estilo = {
         "filled": True,
         "fill_color": VERDE_SUAVE,
@@ -182,7 +211,7 @@ class CampoTexto:
         icone,
         on_escolha: Callable[[str], None] | None = None,
         on_enter: Callable[[], None] | None = None,
-        largura: int = 480,
+        largura: int | None = 480,
     ) -> None:
         self.on_escolha = on_escolha
         self.on_enter = on_enter
@@ -207,10 +236,12 @@ class CampoTexto:
             self.on_escolha(escolhido)
         return escolhido
 
-    def _ao_enter(self, _=None) -> None:
+    async def _ao_enter(self, _=None) -> None:
         self.aceitar()
         if self.on_enter:
-            self.on_enter()
+            resultado = self.on_enter()
+            if inspect.isawaitable(resultado):
+                await resultado
 
 
 class CampoData:
