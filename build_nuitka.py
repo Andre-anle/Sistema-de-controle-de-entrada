@@ -19,7 +19,10 @@ def _tem_flet_exe(pasta: Path) -> bool:
     return (pasta / "flet" / "flet.exe").is_file() or (pasta / "flet.exe").is_file()
 
 
-def _normalizar_cliente(origem: Path, destino: Path) -> Path:
+ARQUIVO_VERSAO_CLIENTE = "versao.txt"
+
+
+def _normalizar_cliente(origem: Path, destino: Path, versao: str) -> Path:
     if destino.exists():
         shutil.rmtree(destino)
     destino.mkdir(parents=True, exist_ok=True)
@@ -30,31 +33,42 @@ def _normalizar_cliente(origem: Path, destino: Path) -> Path:
         shutil.copytree(origem, destino / "flet", dirs_exist_ok=True)
     else:
         raise FileNotFoundError(f"flet.exe não encontrado em {origem}")
+    (destino / ARQUIVO_VERSAO_CLIENTE).write_text(versao, encoding="utf-8")
     return destino
+
+
+def _versao_cliente_local(pasta: Path) -> str:
+    try:
+        return (pasta / ARQUIVO_VERSAO_CLIENTE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def pasta_flet_client() -> Path:
     import flet_desktop
 
+    versao = flet_desktop.version.version
     raiz = Path(__file__).resolve().parent
     local = raiz / ".flet_runtime"
     if _tem_flet_exe(local):
-        return local
+        if _versao_cliente_local(local) == versao:
+            return local
+        print(f"Cliente Flet em {local} não é da versão {versao}. Atualizando...")
 
     candidatos = [
         Path(flet_desktop.__file__).resolve().parent / "app",
-        Path.home() / ".flet" / "client" / f"flet-desktop-full-{flet_desktop.version.version}",
-        Path.home() / ".flet" / "client" / f"flet-desktop-light-{flet_desktop.version.version}",
+        Path.home() / ".flet" / "client" / f"flet-desktop-full-{versao}",
+        Path.home() / ".flet" / "client" / f"flet-desktop-light-{versao}",
     ]
     for pasta in candidatos:
         if _tem_flet_exe(pasta):
             print(f"Usando cliente Flet em {pasta}")
-            return _normalizar_cliente(pasta, local)
+            return _normalizar_cliente(pasta, local, versao)
 
     print("Cliente Flet não está na venv. Baixando o runtime desktop (uma vez)...")
     cache = Path(flet_desktop.ensure_client_cached())
     if _tem_flet_exe(cache):
-        return _normalizar_cliente(cache, local)
+        return _normalizar_cliente(cache, local, versao)
 
     raise FileNotFoundError(
         f"Não foi possível obter o cliente Flet. Conferir {cache} após o download."
