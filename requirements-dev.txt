@@ -1,0 +1,5 @@
+-r requirements.txt
+types-pywin32==312.0.0.20260724
+nuitka>=4.2.1
+ordered-set>=4.1.0
+zstandard>=0.23.0
