@@ -3,6 +3,7 @@ from io import BytesIO
 from typing import Any, Iterable
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
@@ -68,6 +69,22 @@ _ESTILO_TABELA = TableStyleInfo(
     showRowStripes=True,
     showColumnStripes=False,
 )
+
+
+# Injeção de fórmula: um campo digitado como  =HYPERLINK(...)  ou  =cmd|'/c calc'!A1
+# viraria fórmula ao abrir o Excel. Aqui o valor é sempre gravado como TEXTO.
+_PREFIXOS_FORMULA = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def _texto_seguro(texto: str) -> str:
+    """Remove caracteres de controle que o formato xlsx não aceita (evita falha na exportação)."""
+    return ILLEGAL_CHARACTERS_RE.sub("", texto)
+
+
+def _neutralizar_formula(celula, texto: str) -> None:
+    if texto.startswith(_PREFIXOS_FORMULA):
+        celula.data_type = "s"  # nunca "f" (fórmula)
+        celula.quotePrefix = True  # o Excel também mostra como texto ao editar
 
 
 def _para_data(valor: Any) -> datetime | str:
@@ -150,7 +167,9 @@ def _escrever_cabecalho(ws: Worksheet, titulo: str, filtros: str, qtd: int, tota
     _estilizar(titulo_celula, font=_FONTE_TITULO, fill=_FILL_CREME, alignment=_ALINHAMENTO)
 
     gerado = datetime.now().strftime("%d/%m/%Y %H:%M")
-    filtro = ws.cell(3, 1, f"Gerado em {gerado}   ·   Filtros: {filtros}   ·   {total} registro(s)")
+    filtro = ws.cell(
+        3, 1, _texto_seguro(f"Gerado em {gerado}   ·   Filtros: {filtros}   ·   {total} registro(s)")
+    )
     _estilizar(filtro, font=_FONTE_FILTRO, fill=_FILL_CREME, alignment=_ALINHAMENTO_QUEBRA)
 
     ws.row_dimensions[1].height = 24
@@ -210,8 +229,11 @@ def _escrever_aba(
             elif bruto is None:
                 valor = None
             else:
-                valor = str(bruto)
-            celula = ws.cell(linha, coluna, valor)
+                valor = _texto_seguro(str(bruto))
+            celula = ws.cell(linha, coluna)
+            celula.value = valor
+            if isinstance(valor, str):
+                _neutralizar_formula(celula, valor)
             if isinstance(valor, datetime):
                 celula.number_format = _FORMATO_DATA
 

@@ -1,15 +1,21 @@
 import sqlite3
 import sys
-import ssl
+import threading
 from dataclasses import replace
 
 import flet as ft
 
+import acesso
+import backup
 import db
+import logs
+import migracoes
+import validacao
+from atualizador import confirmar_inicializacao
 from paths import LOGO_PATH, ICONE_PATH
 from print_label import imprimir_etiquetas_produto, impressora_padrao
-from remote_access import aplicar_acesso_remoto, gerar_chave, parar_servidor
-from settings import carregar_config, salvar_config
+from remote_access import aplicar_acesso_remoto, parar_servidor
+from settings import carregar_config
 from ui_base import (
     BORDA,
     CARTAO,
@@ -31,31 +37,21 @@ from ui_base import (
     icone_destaque,
     mostrar_snack,
 )
+from ui_atualizacao import AtualizacaoMixin
 from ui_config import ConfigMixin
 from ui_consulta import ConsultaMixin
+from ui_seguranca import SegurancaMixin
 from ui_visitantes import VisitantesMixin
 
-QUANTIDADE_MAXIMA = 50
+QUANTIDADE_MAXIMA = validacao.QUANTIDADE_MAXIMA
 
 
-def ean_valido(ean: str) -> bool:
-    limpo = ean.strip()
-    if not limpo:
-        return False
-    if limpo.isdigit():
-        return 8 <= len(limpo) <= 14
-    return 3 <= len(limpo) <= 32
-
-
-class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
+class App(ConsultaMixin, VisitantesMixin, ConfigMixin, AtualizacaoMixin, SegurancaMixin):
     def __init__(self, page: ft.Page) -> None:
         self.page = page
         self.config = carregar_config()
         if not self.config.printer:
             self.config.printer = impressora_padrao()
-        if self.config.remote_enabled and not self.config.remote_token:
-            self.config.remote_token = gerar_chave()
-            salvar_config(self.config)
 
         aplicar_tema(page)
         page.title = "Hortifruti Natural da Terra · Etiquetas"
@@ -73,6 +69,7 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
             on_escolha=self._ao_selecionar_ean,
             on_enter=lambda: self.descricao.campo.focus(),
             largura=None,
+            somente_numeros=True,
         )
         self.ean.campo.autofocus = True
         self.descricao = CampoTexto(
@@ -152,12 +149,6 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
                     "Pesquise e exporte para Excel",
                     self.consulta_entradas_dialog,
                 ),
-                self._atalho(
-                    ft.Icons.SETTINGS_OUTLINED,
-                    "Impressora e rede",
-                    "Configure impressora e acesso remoto",
-                    self.abrir_dialogo_configuracao,
-                ),
             ],
             spacing=16,
         )
@@ -196,6 +187,7 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
             )
         )
         self._aplicar_acesso_remoto(avisar=False)
+        self.iniciar_atualizacao_automatica()
 
     def _barra_superior(self) -> ft.Control:
         return ft.Container(
@@ -259,13 +251,63 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
         self.ponto_remoto = ft.Container(width=8, height=8, border_radius=4)
         self.chip_remoto = ft.Container(
             border_radius=20,
-            padding=ft.Padding.symmetric(horizontal=14, vertical=8),
-            ink=True,
-            on_click=lambda _: self.abrir_dialogo_configuracao(),
-            content=ft.Row([self.ponto_remoto, self.rotulo_remoto], spacing=8, tight=True),
+            padding=ft.Padding.only(left=14, top=8, right=8, bottom=8),
+            content=ft.Row(
+                [
+                    self.ponto_remoto,
+                    self.rotulo_remoto,
+                    ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=20, color=TEXTO_SUAVE),
+                ],
+                spacing=8,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
         self._estilizar_chip_remoto()
-        return self.chip_remoto
+
+        # Menu recolhido: abre ao clicar no indicador "Acesso remoto".
+        # Os itens dependem de haver um gerente/administrador identificado.
+        self.menu_remoto = ft.PopupMenuButton(
+            content=self.chip_remoto,
+            tooltip="Menu de gerência",
+            menu_position=ft.PopupMenuPosition.UNDER,
+            items=self._itens_menu_remoto(),
+        )
+        return self.menu_remoto
+
+    def _itens_menu_remoto(self) -> list[ft.PopupMenuItem]:
+        def item(icone, texto: str, acao) -> ft.PopupMenuItem:
+            return ft.PopupMenuItem(
+                icon=icone,
+                content=ft.Text(texto, size=14, color=TEXTO),
+                on_click=lambda _: acao(),
+            )
+
+        gerente = self._gerente_ativo()
+        if gerente is None:
+            return [
+                item(
+                    ft.Icons.LOCK_OUTLINE,
+                    "Entrar como gerente ou administrador",
+                    self.entrar_modo_gerente,
+                ),
+            ]
+        return [
+            item(ft.Icons.SETTINGS_OUTLINED, "Impressora e rede", self.abrir_configuracao_protegida),
+            item(ft.Icons.SHIELD_OUTLINED, "Segurança e backup", self.abrir_seguranca_protegida),
+            item(
+                ft.Icons.LOGOUT,
+                f"Encerrar acesso de gerência ({gerente.usuario})",
+                self.sair_modo_gerente,
+            ),
+        ]
+
+    def _atualizar_menu_remoto(self) -> None:
+        menu = getattr(self, "menu_remoto", None)
+        if menu is None:
+            return
+        menu.items = self._itens_menu_remoto()
+        menu.update()
 
     def _estilizar_chip_remoto(self) -> None:
         ativo = self.config.remote_enabled
@@ -273,11 +315,6 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
         self.rotulo_remoto.color = VERDE if ativo else TEXTO_SUAVE
         self.ponto_remoto.bgcolor = VERDE_FOLHA if ativo else "#A7B3A9"
         self.chip_remoto.bgcolor = VERDE_SUAVE if ativo else CREME
-        self.chip_remoto.tooltip = (
-            "Outros computadores da loja podem consultar pela rede"
-            if ativo
-            else "Clique para ativar a consulta pela rede"
-        )
 
     def _atualizar_rotulo_remoto(self) -> None:
         if hasattr(self, "chip_remoto"):
@@ -288,7 +325,8 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
         erro = aplicar_acesso_remoto(
             self.config.remote_enabled,
             self.config.remote_port,
-            self.config.remote_token,
+            https=self.config.remote_https,
+            redes_extras=tuple(self.config.remote_redes),
         )
         if erro:
             self.config.remote_enabled = False
@@ -304,6 +342,11 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
     def _ao_janela(self, evento) -> None:
         if getattr(evento, "type", None) == ft.WindowEventType.CLOSE:
             parar_servidor()
+            backup.parar_agendador()
+            try:
+                db.finalizar_uso()
+            except Exception:
+                logs.log("aplicacao").exception("Falha ao finalizar o banco")
 
     def _logo(self) -> ft.Control:
         if LOGO_PATH.is_file():
@@ -330,8 +373,12 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
         if not descricao or not colaborador:
             mostrar_snack(self.page, "Preencha a descrição e o colaborador.")
             return
-        if ean and not ean_valido(ean):
-            mostrar_snack(self.page, "EAN inválido. Use 8 a 14 dígitos ou um código de 3 a 32 caracteres.")
+        try:
+            ean = validacao.validar_ean_opcional(ean)
+            descricao = validacao.validar_descricao(descricao)
+            colaborador = validacao.validar_colaborador(colaborador)
+        except ValueError as exc:
+            mostrar_snack(self.page, str(exc))
             return
         if not self._impressora_ok():
             return
@@ -340,15 +387,9 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
 
         def on_confirmar(_):
             try:
-                quantidade = int((qtd_input.value or "").strip())
-            except ValueError:
-                mostrar_snack(self.page, "Digite um número válido para quantidade.")
-                return
-            if quantidade < 1 or quantidade > QUANTIDADE_MAXIMA:
-                mostrar_snack(
-                    self.page,
-                    f"A quantidade deve ser entre 1 e {QUANTIDADE_MAXIMA}.",
-                )
+                quantidade = validacao.validar_quantidade(qtd_input.value)
+            except ValueError as exc:
+                mostrar_snack(self.page, str(exc))
                 return
             fechar_dialogo(dialogo)
             self._imprimir_lote_produto(ean, descricao, colaborador, quantidade)
@@ -398,12 +439,104 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin):
         self.page.run_thread(trabalho)
 
 
-def main(page: ft.Page) -> None:
+def _erro_fatal(page: ft.Page, mensagem: str) -> None:
+    page.add(
+        ft.Container(
+            padding=32,
+            content=ft.Column(
+                [
+                    ft.Text("Não foi possível iniciar", size=22, weight=ft.FontWeight.BOLD, color=VERDE),
+                    ft.Text(mensagem, size=15, color=TEXTO, selectable=True),
+                ],
+                spacing=12,
+            ),
+        )
+    )
+
+
+def _manutencao(config, avisar) -> None:
+    """Tarefas pesadas fora da thread da interface: integridade, backup, retenção."""
+    registro = logs.log("manutencao")
     try:
-        db.excluir_entradas_antigas()
+        integro, detalhe = db.verificar_integridade()
+        if not integro:
+            registro.critical("Banco de dados com problema: %s", detalhe)
+            avisar(
+                "O banco de dados apresentou problemas de integridade. "
+                "Consulte 'Segurança e backup' e restaure um backup, se necessário."
+            )
+        if config.backup_auto:
+            idade = backup.idade_ultimo_horas()
+            if idade is None or idade >= 24:
+                # Backup ANTES da limpeza por retenção.
+                backup.criar_backup("automatico", config.backup_manter)
+        removidos = db.excluir_entradas_antigas()
+        if removidos and any(removidos.values()):
+            acesso.registrar_evento(
+                "retencao", "Registros antigos removidos: " + ", ".join(f"{k}={v}" for k, v in removidos.items())
+            )
+        if config.backup_auto:
+            backup.iniciar_agendador(24, config.backup_manter)
+    except Exception:
+        registro.exception("Falha na manutenção em segundo plano")
+
+
+def main(page: ft.Page) -> None:
+    logs.configurar()
+    registro = logs.log("aplicacao")
+    registro.info("Aplicativo iniciado")
+    senha_inicial = None
+    try:
+        senha_inicial = acesso.garantir_admin_padrao()
+    except migracoes.ErroMigracao as exc:
+        registro.critical("Banco incompatível: %s", exc)
+        _erro_fatal(page, str(exc))
+        return
     except sqlite3.Error:
-        pass
-    App(page)
+        registro.exception("Falha ao preparar o banco de dados")
+
+    codigo_backup = None
+    try:
+        _, chave_nova = backup.obter_chave()
+        if chave_nova:
+            codigo_backup = backup.codigo_recuperacao()
+    except Exception:
+        registro.exception("Não foi possível preparar a chave de backup")
+
+    app = App(page)
+
+    def avisar(mensagem: str) -> None:
+        async def mostrar() -> None:
+            mostrar_snack(page, mensagem)
+
+        page.run_task(mostrar)
+
+    threading.Thread(
+        target=_manutencao, args=(app.config, avisar), name="manutencao", daemon=True
+    ).start()
+    confirmar_inicializacao()
+    if senha_inicial or codigo_backup:
+        app.mostrar_primeiros_passos(senha_inicial, codigo_backup)
+
+
+def _restaurar_pela_linha_de_comando(argumentos: list[str]) -> int:
+    """`Etiquetas.exe --restaurar <arquivo.ehb> [codigo]` (app fechado)."""
+    import ctypes
+    from pathlib import Path
+
+    def aviso(texto: str, icone: int) -> None:
+        ctypes.windll.user32.MessageBoxW(0, texto, "Etiquetas Hortifruti", icone)
+
+    if not argumentos:
+        aviso("Uso: --restaurar <arquivo.ehb> [codigo-de-recuperacao]", 0x10)
+        return 2
+    try:
+        antigo = backup.restaurar(Path(argumentos[0]), argumentos[1] if len(argumentos) > 1 else None)
+    except Exception as exc:
+        aviso(f"Falha ao restaurar:\n\n{exc}", 0x10)
+        return 1
+    aviso(f"Backup restaurado com sucesso.\n\nO banco anterior foi guardado em:\n{antigo}", 0x40)
+    return 0
 
 
 if __name__ == "__main__":
@@ -414,6 +547,9 @@ if __name__ == "__main__":
         from paths import preparar_runtime
 
         preparar_runtime()
+        if len(sys.argv) > 1 and sys.argv[1] == "--restaurar":
+            logs.configurar()
+            sys.exit(_restaurar_pela_linha_de_comando(sys.argv[2:]))
         ft.run(main)
     except Exception:
         texto = traceback.format_exc()

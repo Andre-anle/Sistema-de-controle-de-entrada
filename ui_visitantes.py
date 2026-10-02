@@ -4,6 +4,7 @@ from dataclasses import replace
 import flet as ft
 
 import db
+import validacao
 from print_label import imprimir_etiqueta_visitante
 from settings import AppSettings
 from ui_base import (
@@ -249,6 +250,13 @@ class VisitantesMixin:
                     self.page,
                     "Preencha nome, documento, função, empresa e quem autorizou.",
                 )
+                return
+            try:
+                nome, documento, funcao, empresa, autorizado_por = validacao.validar_visitante(
+                    nome, documento, funcao, empresa, autorizado_por
+                )
+            except ValueError as exc:
+                mostrar_snack(self.page, str(exc))
                 return
             if not self._impressora_ok():
                 return

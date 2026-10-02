@@ -23,6 +23,12 @@ def diretorio_recursos() -> Path:
 
 APP_DIR = diretorio_executavel()
 CONFIG_PATH = APP_DIR / "config.json"
+# Pastas criadas pelo uso do programa. Nunca entram em pacotes de atualização.
+BACKUP_DIR = APP_DIR / "backups"
+LOG_DIR = APP_DIR / "logs"
+SEGREDOS_DIR = APP_DIR / "segredos"
+CERT_DIR = APP_DIR / "certificados"
+PASTAS_DO_USUARIO = ("backups", "logs", "segredos", "certificados", "_atualizacao")
 LOGO_PATH = diretorio_recursos() / "logo.png"
 if not LOGO_PATH.is_file():
     LOGO_PATH = APP_DIR / "logo.png"

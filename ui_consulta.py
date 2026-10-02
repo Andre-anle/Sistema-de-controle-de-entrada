@@ -82,7 +82,7 @@ class ConsultaMixin:
     def consulta_entradas_dialog(self) -> None:
         data_ini_merc = CampoData("Data/hora inicial")
         data_fim_merc = CampoData("Data/hora final")
-        ean_filtro = CampoTexto("Mercadoria (EAN)", ft.Icons.QR_CODE_2, largura=220)
+        ean_filtro = CampoTexto("Mercadoria (EAN)", ft.Icons.QR_CODE_2, largura=220, somente_numeros=True)
         nome_merc = CampoTexto("Nome da mercadoria", ft.Icons.INVENTORY_2_OUTLINED, largura=220)
         colaborador_filtro = CampoTexto("Nome do colaborador", ft.Icons.PERSON_OUTLINE, largura=220)
 

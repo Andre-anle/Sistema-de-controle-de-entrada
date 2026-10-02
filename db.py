@@ -7,11 +7,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
+import migracoes
+import validacao
+from logs import log
 from paths import APP_DIR, bancos_antigos
 
 _banco: Path | None = None
 _schema_pronto = False
 _lock = threading.RLock()
+
+# Só roda VACUUM (caro) quando muita coisa foi apagada ou faz tempo que não roda.
+VACUUM_MIN_REGISTROS = 200
+VACUUM_INTERVALO_DIAS = 30
 
 
 def _sqlite_valido(caminho: Path) -> bool:
@@ -71,10 +78,36 @@ def arquivo_banco() -> Path:
     return _banco
 
 
+def usar_banco(caminho: Path | None) -> None:
+    """Troca o arquivo do banco (testes e restauração). None volta à detecção automática."""
+    global _banco, _schema_pronto
+    with _lock:
+        _banco = caminho
+        _schema_pronto = False
+
+
 def _abrir() -> sqlite3.Connection:
     conn = sqlite3.connect(arquivo_banco(), timeout=15)
     conn.row_factory = sqlite3.Row
+    # Segurança
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA trusted_schema = OFF")
+    # Apagar de verdade: registros removidos pela retenção não ficam nas páginas livres.
+    conn.execute("PRAGMA secure_delete = ON")
+    # Desempenho (seguro com WAL)
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -16000")
     return conn
+
+
+def _backup_antes_de_migrar() -> None:
+    try:
+        import backup
+
+        backup.criar_backup("pre-migracao")
+    except Exception:
+        log("db").exception("Não foi possível fazer o backup antes da migração; seguindo.")
 
 
 def _garantir_schema() -> None:
@@ -86,9 +119,10 @@ def _garantir_schema() -> None:
             return
         conn = _abrir()
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            inicializar_schema(conn)
-            conn.commit()
+            conn.execute("PRAGMA journal_mode = WAL")
+            aplicadas = migracoes.migrar(conn, antes_de_alterar=_backup_antes_de_migrar)
+            if aplicadas:
+                log("db").info("Migrations aplicadas: %s", aplicadas)
         finally:
             conn.close()
         _schema_pronto = True
@@ -108,86 +142,70 @@ def conexao() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _colunas(conn: sqlite3.Connection, tabela: str) -> set[str]:
-    return {linha[1] for linha in conn.execute(f"PRAGMA table_info({tabela})")}
+def finalizar_uso() -> None:
+    """Grava o que está pendente no WAL para o banco ficar consistente ao encerrar."""
+    conn = _abrir()
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("PRAGMA optimize")
+    finally:
+        conn.close()
 
 
-def inicializar_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS etiquetas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ean TEXT NOT NULL,
-            descricao TEXT NOT NULL,
-            colaborador TEXT NOT NULL,
-            data_hora TEXT NOT NULL,
-            quantidade INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-    colunas = _colunas(conn, "etiquetas")
-    if "quantidade" not in colunas:
+def verificar_integridade(completa: bool = False) -> tuple[bool, str]:
+    """`quick_check` (rápido) ou `integrity_check` (completo). Nunca levanta exceção."""
+    try:
+        _garantir_schema()
+        conn = _abrir()
+        try:
+            comando = "PRAGMA integrity_check" if completa else "PRAGMA quick_check"
+            resultado = [linha[0] for linha in conn.execute(comando).fetchall()]
+        finally:
+            conn.close()
+    except (sqlite3.Error, migracoes.ErroMigracao) as exc:
+        return False, f"Falha ao abrir o banco: {exc}"
+    if resultado == ["ok"]:
+        return True, "Banco íntegro."
+    return False, "; ".join(str(r) for r in resultado[:5])
+
+
+def estatisticas() -> dict[str, int]:
+    """Números simples para monitoramento (sem dados pessoais)."""
+    with conexao() as conn:
+        dados = {
+            "etiquetas": conn.execute("SELECT COUNT(*) FROM etiquetas").fetchone()[0],
+            "visitantes": conn.execute("SELECT COUNT(*) FROM visitantes").fetchone()[0],
+            "visitantes_na_loja": conn.execute(
+                "SELECT COUNT(*) FROM visitantes WHERE saida IS NULL"
+            ).fetchone()[0],
+            "usuarios": conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0],
+            "log_registros": conn.execute("SELECT COUNT(*) FROM log_alteracoes").fetchone()[0],
+            "esquema": migracoes.versao_atual(conn),
+        }
+    try:
+        dados["banco_bytes"] = arquivo_banco().stat().st_size
+    except OSError:
+        dados["banco_bytes"] = 0
+    return {k: int(v) for k, v in dados.items()}
+
+
+# ------------------------------------------------------------------- meta
+
+def meta_ler(chave: str, padrao: str = "") -> str:
+    with conexao() as conn:
+        linha = conn.execute("SELECT valor FROM meta WHERE chave = ?", (chave,)).fetchone()
+    return str(linha["valor"]) if linha else padrao
+
+
+def meta_gravar(chave: str, valor: str) -> None:
+    with conexao() as conn:
         conn.execute(
-            "ALTER TABLE etiquetas ADD COLUMN quantidade INTEGER NOT NULL DEFAULT 1"
+            "INSERT OR REPLACE INTO meta (chave, valor, atualizado_em) VALUES (?, ?, ?)",
+            (chave, valor, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
-    if "tipo" in colunas:
-        outro_tipo = conn.execute(
-            "SELECT 1 FROM etiquetas WHERE tipo != 'produto' LIMIT 1"
-        ).fetchone()
-        if outro_tipo is None:
-            conn.execute("DROP INDEX IF EXISTS idx_etiquetas_tipo")
-            try:
-                conn.execute("ALTER TABLE etiquetas DROP COLUMN tipo")
-            except sqlite3.OperationalError:
-                pass
 
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS visitantes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            documento TEXT NOT NULL DEFAULT '',
-            funcao TEXT NOT NULL,
-            empresa TEXT NOT NULL,
-            autorizado_por TEXT NOT NULL DEFAULT '',
-            entrada TEXT NOT NULL,
-            saida TEXT
-        )
-        """
-    )
-    colunas_vis = _colunas(conn, "visitantes")
-    if "data_hora" in colunas_vis and "entrada" not in colunas_vis:
-        conn.execute("ALTER TABLE visitantes RENAME COLUMN data_hora TO entrada")
-    if "documento" not in colunas_vis:
-        conn.execute(
-            "ALTER TABLE visitantes ADD COLUMN documento TEXT NOT NULL DEFAULT ''"
-        )
-    if "autorizado_por" not in colunas_vis:
-        conn.execute(
-            "ALTER TABLE visitantes ADD COLUMN autorizado_por TEXT NOT NULL DEFAULT ''"
-        )
-    if "saida" not in colunas_vis:
-        conn.execute("ALTER TABLE visitantes ADD COLUMN saida TEXT")
 
-    for indice in (
-        "idx_etiquetas_colaborador",
-        "idx_etiquetas_descricao",
-        "idx_visitantes_nome",
-        "idx_visitantes_empresa",
-    ):
-        conn.execute(f"DROP INDEX IF EXISTS {indice}")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_etiquetas_ean ON etiquetas(ean)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_etiquetas_data_hora ON etiquetas(data_hora)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_visitantes_entrada ON visitantes(entrada)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_visitantes_ativos ON visitantes(entrada) "
-        "WHERE saida IS NULL"
-    )
-
+# ---------------------------------------------------------------- inserção
 
 def adicionar_etiquetas(
     ean: str,
@@ -196,6 +214,12 @@ def adicionar_etiquetas(
     data_hora: str,
     quantidade: int,
 ) -> None:
+    # Validação também aqui: o banco não confia em quem chama.
+    ean = validacao.validar_ean_opcional(ean)
+    descricao = validacao.validar_descricao(descricao)
+    colaborador = validacao.validar_colaborador(colaborador)
+    quantidade = validacao.validar_quantidade(quantidade)
+    data_hora = normalizar_filtro_data(data_hora)
     with conexao() as conn:
         conn.execute(
             """
@@ -210,6 +234,8 @@ def normalizar_filtro_data(texto: str, fim_do_dia: bool = False) -> str:
     bruto = (texto or "").strip()
     if not bruto:
         return ""
+    if len(bruto) > 19:
+        raise ValueError("Data/hora inválida. Use dd/mm/aa, dd/mm/aaaa ou dd/mm/aaaa hh:mm.")
     formatos = (
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
@@ -241,15 +267,27 @@ def normalizar_filtro_data(texto: str, fim_do_dia: bool = False) -> str:
 
 
 def _like(termo: str) -> str:
-    return f"%{termo.strip()}%"
+    """Padrão LIKE 'contém', com %, _ e \\ do usuário tratados como texto comum."""
+    return f"%{validacao.escapar_like(termo.strip())}%"
+
+
+# Limite de linhas de uma consulta "sem limite" (exportação). Protege a memória.
+LIMITE_EXPORTACAO = 100_000
 
 
 def _consultar_com_limite(sql: str, params: tuple, limite: int | None) -> list[sqlite3.Row]:
-    if limite is not None:
-        sql = f"{sql} LIMIT ?"
-        params = (*params, int(limite))
+    if limite is None:
+        limite = LIMITE_EXPORTACAO + 1
+    sql = f"{sql} LIMIT ?"  # nosec B608 (sql é sempre literal do módulo)
+    params = (*params, int(limite))
     with conexao() as conn:
-        return conn.execute(sql, params).fetchall()
+        linhas = conn.execute(sql, params).fetchall()
+    if limite == LIMITE_EXPORTACAO + 1 and len(linhas) > LIMITE_EXPORTACAO:
+        maximo = f"{LIMITE_EXPORTACAO:,}".replace(",", ".")
+        raise ValueError(
+            f"Há mais de {maximo} registros neste filtro. Use um período menor para exportar."
+        )
+    return linhas
 
 
 def consultar_entradas_produto(
@@ -260,25 +298,28 @@ def consultar_entradas_produto(
     data_fim: str = "",
     limite: int | None = 300,
 ) -> list[sqlite3.Row]:
+    ean = validacao.limpar_filtro(ean, "filtro de EAN")
+    descricao = validacao.limpar_filtro(descricao, "filtro de nome")
+    colaborador = validacao.limpar_filtro(colaborador, "filtro de colaborador")
     inicio = normalizar_filtro_data(data_inicio)
     fim = normalizar_filtro_data(data_fim, fim_do_dia=True)
     return _consultar_com_limite(
         """
-        SELECT ean, descricao, colaborador, quantidade, data_hora
+        SELECT id, ean, descricao, colaborador, quantidade, data_hora
         FROM etiquetas
-        WHERE (? = '' OR ean LIKE ? COLLATE NOCASE)
-          AND (? = '' OR descricao LIKE ? COLLATE NOCASE)
-          AND (? = '' OR colaborador LIKE ? COLLATE NOCASE)
+        WHERE (? = '' OR ean LIKE ? ESCAPE '\\')
+          AND (? = '' OR descricao LIKE ? ESCAPE '\\')
+          AND (? = '' OR colaborador LIKE ? ESCAPE '\\')
           AND (? = '' OR data_hora >= ?)
           AND (? = '' OR data_hora <= ?)
         ORDER BY id DESC
         """,
         (
-            ean.strip(),
+            ean,
             _like(ean),
-            descricao.strip(),
+            descricao,
             _like(descricao),
-            colaborador.strip(),
+            colaborador,
             _like(colaborador),
             inicio,
             inicio,
@@ -296,6 +337,8 @@ def consultar_entradas_visitante(
     data_fim: str = "",
     limite: int | None = 300,
 ) -> list[sqlite3.Row]:
+    nome = validacao.limpar_filtro(nome, "filtro de visitante")
+    empresa = validacao.limpar_filtro(empresa, "filtro de empresa")
     inicio = normalizar_filtro_data(data_inicio)
     fim = normalizar_filtro_data(data_fim, fim_do_dia=True)
     return _consultar_com_limite(
@@ -303,16 +346,16 @@ def consultar_entradas_visitante(
         SELECT nome, documento, funcao, empresa, autorizado_por, entrada,
                COALESCE(saida, '') AS saida
         FROM visitantes
-        WHERE (? = '' OR nome LIKE ? COLLATE NOCASE)
-          AND (? = '' OR empresa LIKE ? COLLATE NOCASE)
+        WHERE (? = '' OR nome LIKE ? ESCAPE '\\')
+          AND (? = '' OR empresa LIKE ? ESCAPE '\\')
           AND (? = '' OR entrada >= ?)
           AND (? = '' OR entrada <= ?)
         ORDER BY id DESC
         """,
         (
-            nome.strip(),
+            nome,
             _like(nome),
-            empresa.strip(),
+            empresa,
             _like(empresa),
             inicio,
             inicio,
@@ -346,6 +389,10 @@ def adicionar_visitante(
     autorizado_por: str,
     entrada: str,
 ) -> None:
+    nome, documento, funcao, empresa, autorizado_por = validacao.validar_visitante(
+        nome, documento, funcao, empresa, autorizado_por
+    )
+    entrada = normalizar_filtro_data(entrada)
     with conexao() as conn:
         conn.execute(
             """
@@ -369,10 +416,11 @@ def listar_visitantes_ativos() -> list[sqlite3.Row]:
 
 
 def registrar_saida_visitante(visitante_id: int, saida: str) -> bool:
+    saida = normalizar_filtro_data(saida)
     with conexao() as conn:
         cursor = conn.execute(
             "UPDATE visitantes SET saida = ? WHERE id = ? AND saida IS NULL",
-            (saida, visitante_id),
+            (saida, int(visitante_id)),
         )
         return cursor.rowcount > 0
 
@@ -386,7 +434,13 @@ def _subtrair_meses(dt: datetime, meses: int) -> datetime:
 
 
 def excluir_entradas_antigas(meses: int = 6) -> dict[str, int]:
-    corte = _subtrair_meses(datetime.now(), meses).strftime("%Y-%m-%d %H:%M:%S")
+    """Retenção: apaga entradas com mais de `meses` meses.
+
+    Pode demorar (VACUUM); chame em segundo plano. O VACUUM só roda quando
+    foi apagado bastante coisa ou quando faz mais de 30 dias do último.
+    """
+    agora = datetime.now()
+    corte = _subtrair_meses(agora, meses).strftime("%Y-%m-%d %H:%M:%S")
     with conexao() as conn:
         etiquetas = conn.execute(
             "DELETE FROM etiquetas WHERE data_hora < ?", (corte,)
@@ -394,10 +448,20 @@ def excluir_entradas_antigas(meses: int = 6) -> dict[str, int]:
         visitantes = conn.execute(
             "DELETE FROM visitantes WHERE entrada < ?", (corte,)
         ).rowcount
-    if etiquetas or visitantes:
-        conn = _abrir()
-        try:
-            conn.execute("VACUUM")
-        finally:
-            conn.close()
+    total = etiquetas + visitantes
+    if total:
+        ultimo = meta_ler("ultimo_vacuum")
+        vencido = True
+        if ultimo:
+            try:
+                vencido = (agora - datetime.strptime(ultimo, "%Y-%m-%d %H:%M:%S")).days >= VACUUM_INTERVALO_DIAS
+            except ValueError:
+                vencido = True
+        if total >= VACUUM_MIN_REGISTROS or vencido:
+            conn = _abrir()
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+            meta_gravar("ultimo_vacuum", agora.strftime("%Y-%m-%d %H:%M:%S"))
     return {"etiquetas": etiquetas, "visitantes": visitantes}

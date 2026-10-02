@@ -212,12 +212,21 @@ class CampoTexto:
         on_escolha: Callable[[str], None] | None = None,
         on_enter: Callable[[], None] | None = None,
         largura: int | None = 480,
+        somente_numeros: bool = False,
     ) -> None:
         self.on_escolha = on_escolha
         self.on_enter = on_enter
+        extras = {}
+        if somente_numeros:
+            # Bloqueia a digitação (e a colagem) de qualquer caractere que não seja dígito.
+            extras = {
+                "input_filter": ft.NumbersOnlyInputFilter(),
+                "keyboard_type": ft.KeyboardType.NUMBER,
+            }
         self.campo = ft.TextField(
             label=rotulo,
             on_submit=self._ao_enter,
+            **extras,
             **estilo_campo(largura, icone),
         )
         self.view = self.campo

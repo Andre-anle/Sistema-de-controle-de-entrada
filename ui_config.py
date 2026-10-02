@@ -1,7 +1,8 @@
 import flet as ft
 
+import tls
 from print_label import listar_impressoras
-from remote_access import gerar_chave, urls_acesso
+from remote_access import urls_acesso
 from settings import AppSettings, impressora_disponivel, salvar_config
 from ui_base import (
     BORDA,
@@ -36,6 +37,9 @@ class ConfigMixin:
         return True
 
     def abrir_dialogo_configuracao(self) -> None:
+        if self._gerente_ativo() is None:  # defesa extra: nunca abre sem identificação
+            self._exigir_gerente(self.abrir_dialogo_configuracao)
+            return
         impressoras = listar_impressoras()
         ausente = bool(self.config.printer) and self.config.printer not in impressoras
         if ausente:
@@ -80,19 +84,30 @@ class ConfigMixin:
             value=str(self.config.remote_port or 8765),
             **estilo_campo(160),
         )
-        chave_atual = self.config.remote_token or gerar_chave()
-        chave_input = ft.TextField(
-            label="Chave de acesso",
-            value=chave_atual,
-            password=True,
-            can_reveal_password=True,
-            **estilo_campo(320),
+        https_switch = ft.Switch(
+            label="Usar HTTPS (conexão criptografada - recomendado)",
+            value=self.config.remote_https,
         )
         url_texto = ft.Text(
-            "\n".join(urls_acesso(int(self.config.remote_port or 8765), chave_atual)),
+            "\n".join(urls_acesso(int(self.config.remote_port or 8765), self.config.remote_https)),
             size=12,
             selectable=True,
             color=TEXTO,
+        )
+        impressao = ""
+        try:
+            impressao = tls.impressao_digital()
+        except Exception:
+            impressao = ""
+        aviso_certificado = ft.Text(
+            "Na primeira vez, o navegador avisa que o certificado não é de uma autoridade "
+            "conhecida (ele é gerado neste computador). Confira a impressão digital abaixo "
+            "antes de continuar:\n" + impressao
+            if impressao
+            else "O certificado de segurança é criado na primeira vez que o acesso remoto é ligado.",
+            size=11,
+            selectable=True,
+            color=TEXTO_SUAVE,
         )
 
         def atualizar_url(_=None) -> None:
@@ -100,14 +115,10 @@ class ConfigMixin:
                 porta = int((porta_input.value or "8765").strip())
             except ValueError:
                 porta = 8765
-            chave = (chave_input.value or "").strip() or chave_atual
-            url_texto.value = "\n".join(urls_acesso(porta, chave))
+            url_texto.value = "\n".join(urls_acesso(porta, bool(https_switch.value)))
             url_texto.update()
 
-        def nova_chave(_):
-            chave_input.value = gerar_chave()
-            chave_input.update()
-            atualizar_url()
+        https_switch.on_change = atualizar_url
 
         def copiar_url(_):
             texto = url_texto.value or ""
@@ -119,7 +130,11 @@ class ConfigMixin:
             self.page.run_task(copiar)
 
         porta_input.on_change = atualizar_url
-        chave_input.on_change = atualizar_url
+
+        auto_switch = ft.Switch(
+            label="Procurar atualização ao abrir o programa",
+            value=self.config.update_auto,
+        )
 
         def on_salvar(_):
             if not dropdown_printer.value:
@@ -133,12 +148,13 @@ class ConfigMixin:
             if porta < 1024 or porta > 65535:
                 mostrar_snack(self.page, "A porta deve estar entre 1024 e 65535.")
                 return
+            self.config.update_auto = bool(auto_switch.value)
             self.config.printer = dropdown_printer.value
             self.config.font_size = int(font_size_slider.value or 20)
             self.config.font_name = (font_input.value or "arial.ttf").strip()
             self.config.remote_enabled = bool(remoto_switch.value)
             self.config.remote_port = porta
-            self.config.remote_token = (chave_input.value or "").strip() or gerar_chave()
+            self.config.remote_https = bool(https_switch.value)
             salvar_config(self.config)
             fechar_dialogo(dialogo)
             self._aplicar_acesso_remoto(avisar=True)
@@ -156,27 +172,28 @@ class ConfigMixin:
                     ft.Divider(color=BORDA),
                     titulo_secao("Acesso remoto"),
                     ft.Text(
-                        "Outros computadores da loja consultam e exportam pelo navegador. "
+                        "Outros computadores da loja entram pelo navegador com usuário e senha. "
                         "Este programa precisa permanecer aberto. Libere a porta no Firewall do Windows se pedir.",
                         size=12,
                         color=TEXTO_SUAVE,
                     ),
                     remoto_switch,
                     porta_input,
-                    chave_input,
+                    https_switch,
+                    aviso_certificado,
                     ft.Row(
-                        [
-                            ft.TextButton("Nova chave", on_click=nova_chave),
-                            ft.TextButton("Copiar endereço", on_click=copiar_url),
-                        ],
+                        [ft.TextButton("Copiar endereço", on_click=copiar_url)],
                         wrap=True,
                     ),
                     url_texto,
+                    ft.Divider(color=BORDA),
+                    titulo_secao("Atualizações"),
+                    auto_switch,
                 ],
                 tight=True,
                 spacing=12,
                 width=420,
-                height=460,
+                height=600,
                 scroll=ft.ScrollMode.AUTO,
             ),
             confirmar="Salvar",

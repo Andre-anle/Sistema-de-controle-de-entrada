@@ -6,11 +6,15 @@ import argparse
 import os
 import shutil
 import site
+import hashlib
+import json
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
-VERSAO = "1.0.0"
+from versao import VERSAO
+
 NOME_EXE = "EtiquetasHortifruti.exe"
 PASTA_DIST_FINAL = "EtiquetasHortifruti"
 
@@ -324,6 +328,80 @@ def finalizar_dist(raiz: Path) -> Path:
     return destino
 
 
+ARQUIVOS_DO_USUARIO = {
+    "etiquetas.db", "etiquetas.db-wal", "etiquetas.db-shm", "etiquetas.db.bak",
+    "etiquetas_dados.db", "etiquetas_dados.db-wal", "etiquetas_dados.db-shm",
+    "config.json", "erro.log", "atualizacao.log",
+}
+# Pastas criadas pelo uso (backups cifrados, logs, segredos, certificados):
+# jamais entram no pacote público da versão.
+PASTAS_DO_USUARIO = {"backups", "logs", "segredos", "certificados", "_atualizacao"}
+
+
+def _sha256_de(caminho: Path) -> str:
+    resumo = hashlib.sha256()
+    with caminho.open("rb") as f:
+        for bloco in iter(lambda: f.read(1024 * 1024), b""):
+            resumo.update(bloco)
+    return resumo.hexdigest()
+
+
+def _arquivos_da_versao(pasta: Path) -> list[Path]:
+    """Arquivos que fazem parte do programa (fora os criados pelo uso e o próprio manifesto)."""
+    lista = []
+    for arquivo in sorted(pasta.rglob("*")):
+        if arquivo.is_dir():
+            continue
+        relativo = arquivo.relative_to(pasta)
+        if len(relativo.parts) == 1 and relativo.name.lower() in ARQUIVOS_DO_USUARIO:
+            continue
+        if len(relativo.parts) > 1 and relativo.parts[0].lower() in PASTAS_DO_USUARIO:
+            continue
+        if len(relativo.parts) == 1 and relativo.name == "manifest.json":
+            continue
+        lista.append(arquivo)
+    return lista
+
+
+def gerar_manifesto(pasta: Path) -> Path:
+    """manifest.json: hash e tamanho de cada arquivo. Vai dentro da pasta e do .zip."""
+    arquivos = {
+        arq.relative_to(pasta).as_posix(): {"sha256": _sha256_de(arq), "tamanho": arq.stat().st_size}
+        for arq in _arquivos_da_versao(pasta)
+    }
+    caminho = pasta / "manifest.json"
+    caminho.write_text(
+        json.dumps({"versao": VERSAO, "arquivos": arquivos}, ensure_ascii=False, indent=0),
+        encoding="utf-8",
+    )
+    return caminho
+
+
+def criar_pacote_atualizacao(pasta: Path, saida: Path) -> list[Path]:
+    """Gera os arquivos que vão anexados à Release do GitHub.
+
+    - EtiquetasHortifruti-<versao>.zip            pacote completo
+    - EtiquetasHortifruti-<versao>.manifest.json  lista de arquivos com hash (atualização parcial)
+    - EtiquetasHortifruti-<versao>.zip.sha256     hashes do .zip e do manifesto
+    """
+    saida.mkdir(parents=True, exist_ok=True)
+    manifesto = gerar_manifesto(pasta)
+    pacote = saida / f"{PASTA_DIST_FINAL}-{VERSAO}.zip"
+    pacote.unlink(missing_ok=True)
+    with zipfile.ZipFile(pacote, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for arquivo in [*_arquivos_da_versao(pasta), manifesto]:
+            zf.write(arquivo, arquivo.relative_to(pasta).as_posix())
+    manifesto_publico = saida / f"{PASTA_DIST_FINAL}-{VERSAO}.manifest.json"
+    shutil.copy2(manifesto, manifesto_publico)
+    arquivo_sha = pacote.with_name(pacote.name + ".sha256")
+    arquivo_sha.write_text(
+        f"{_sha256_de(pacote)}  {pacote.name}\n"
+        f"{_sha256_de(manifesto_publico)}  {manifesto_publico.name}\n",
+        encoding="utf-8",
+    )
+    return [pacote, manifesto_publico, arquivo_sha]
+
+
 def garantir_icone_windows(caminho: Path) -> Path:
     """Garante um .ico real. Arquivo JPEG/PNG só com extensão .ico quebra o Nuitka."""
     if not caminho.is_file():
@@ -380,7 +458,22 @@ def montar_comando(onefile: bool, console: bool, jobs: int) -> list[str]:
         "--include-package=barcode",
         "--include-package=openpyxl",
         "--include-package=et_xmlfile",
+        "--include-package=cryptography",
         "--include-module=remote_access",
+        "--include-module=acesso",
+        "--include-module=validacao",
+        "--include-module=limitador",
+        "--include-module=logs",
+        "--include-module=segredos",
+        "--include-module=migracoes",
+        "--include-module=backup",
+        "--include-module=tls",
+        "--include-module=monitor",
+        "--include-module=ui_seguranca",
+        "--include-module=win32crypt",
+        "--include-module=versao",
+        "--include-module=atualizador",
+        "--include-module=ui_atualizacao",
         "--include-module=export_excel",
         "--include-module=db",
         "--include-module=settings",
@@ -460,6 +553,12 @@ def main() -> int:
     exe = pasta / NOME_EXE
     print(f"Pronto para Windows 10 e 11 (64 bits): {exe}")
     print("Distribua a pasta inteira dist\\EtiquetasHortifruti")
+    arquivos = criar_pacote_atualizacao(pasta, pasta.parent / "atualizacao")
+    print()
+    print("Arquivos da atualização (anexe os três à Release):")
+    for arquivo in arquivos:
+        print(f"  {arquivo}")
+    print(f"Para publicar: crie uma Release no GitHub com a tag v{VERSAO}.")
     return 0
 
 

@@ -45,7 +45,7 @@ Name: "atalhodesktop"; Description: "Criar atalho na área de trabalho"; GroupDe
 ; Dados criados pelo programa ficam fora do pacote para que atualizar ou
 ; reinstalar nunca sobrescreva o banco nem as configurações da loja.
 Source: "{#PastaDist}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Excludes: "etiquetas.db,etiquetas.db-wal,etiquetas.db-shm,etiquetas_dados.db*,config.json,erro.log"
+    Excludes: "etiquetas.db,etiquetas.db-wal,etiquetas.db-shm,etiquetas_dados.db*,config.json,erro.log,backups\*,logs\*,segredos\*,certificados\*"
 
 [Icons]
 Name: "{group}\{#AppNome}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"

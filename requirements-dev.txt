@@ -3,3 +3,7 @@ types-pywin32==312.0.0.20260724
 nuitka>=4.2.1
 ordered-set>=4.1.0
 zstandard>=0.23.0
+# Segurança e qualidade (ver docs/SEGURANCA.md)
+pip-audit>=2.9
+bandit==1.9.4
+pyflakes==4.0.0

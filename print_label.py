@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -18,7 +19,8 @@ except ImportError as exc:  # pragma: no cover
         "Instale o pywin32 neste Python com: python -m pip install pywin32==312"
     ) from exc
 
-from paths import FONTES_WINDOWS, LOGO_PATH
+import validacao
+from paths import APP_DIR, FONTES_WINDOWS, LOGO_PATH
 from settings import AppSettings
 
 DPI = 203
@@ -54,14 +56,29 @@ def impressora_padrao() -> str:
         return impressoras[0] if impressoras else ""
 
 
+_EXTENSOES_FONTE = {".ttf", ".otf", ".ttc"}
+TAMANHO_FONTE_MIN = 8
+TAMANHO_FONTE_MAX = 60
+# Fonte é parseada por código nativo (FreeType): só é carregada das pastas de fontes
+# do Windows / do programa, nunca de um caminho qualquer vindo de config.json.
+_PASTAS_FONTES = (
+    FONTES_WINDOWS,
+    APP_DIR / "fontes",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts",
+)
+# Decodificar imagens gigantes (bomba de descompressão) esgota a memória.
+Image.MAX_IMAGE_PIXELS = 20_000_000
+TAMANHO_MAX_LOGO = 5 * 1024 * 1024
+
+
 @lru_cache(maxsize=16)
 def _resolver_fonte(nome: str, tamanho: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidatos = [
-        Path(nome),
-        FONTES_WINDOWS / nome,
-        FONTES_WINDOWS / Path(nome).name,
-        FONTES_WINDOWS / "arial.ttf",
-    ]
+    tamanho = max(TAMANHO_FONTE_MIN, min(int(tamanho), TAMANHO_FONTE_MAX))
+    base = Path(str(nome or "")).name  # descarta qualquer pasta informada
+    candidatos = []
+    if base and Path(base).suffix.lower() in _EXTENSOES_FONTE:
+        candidatos.extend(pasta / base for pasta in _PASTAS_FONTES)
+    candidatos.append(FONTES_WINDOWS / "arial.ttf")
     for caminho in candidatos:
         try:
             if caminho.is_file():
@@ -76,9 +93,11 @@ def _carregar_logo(largura: int = LOGO_LARGURA, altura: int = LOGO_ALTURA) -> Im
     if not LOGO_PATH.is_file():
         return None
     try:
+        if LOGO_PATH.stat().st_size > TAMANHO_MAX_LOGO:
+            return None
         logo = Image.open(LOGO_PATH).convert("RGBA")
         return logo.resize((largura, altura), Image.Resampling.LANCZOS)
-    except OSError:
+    except (OSError, Image.DecompressionBombError):
         return None
 
 
@@ -260,6 +279,11 @@ def imprimir_etiquetas_produto(
     quantidade: int,
     config: AppSettings,
 ) -> None:
+    # Última barreira antes das bibliotecas nativas (Pillow/FreeType/win32).
+    ean = validacao.validar_ean_opcional(ean)
+    descricao = validacao.validar_descricao(descricao)
+    colaborador = validacao.validar_colaborador(colaborador)
+    quantidade = validacao.validar_quantidade(quantidade)
     linhas = [
         "CONTROLE ENTRADA CD",
         *([f"EAN: {ean}"] if ean else []),
@@ -279,6 +303,9 @@ def imprimir_etiqueta_visitante(
     data_hora: str,
     config: AppSettings,
 ) -> None:
+    nome = validacao.limpar_texto(nome, campo="o nome do visitante", maximo=validacao.NOME_MAX)
+    funcao = validacao.limpar_texto(funcao, campo="a função", maximo=validacao.FUNCAO_MAX)
+    empresa = validacao.limpar_texto(empresa, campo="a empresa", maximo=validacao.EMPRESA_MAX)
     linhas = [
         "VISITANTE",
         f"NOME: {nome}",
