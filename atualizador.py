@@ -65,6 +65,9 @@ class Atualizacao:
     url_manifesto: str = ""
     sha256_manifesto: str = ""
     nome_manifesto: str = ""
+    # True quando as notas da Release trazem a marca [auto]: o programa se atualiza
+    # sozinho (após uma contagem regressiva), sem esperar o clique.
+    automatica: bool = False
 
 
 # ------------------------------------------------------------------ versões
@@ -79,6 +82,27 @@ def _numeros(texto: str) -> tuple[int, ...]:
 
 def versao_mais_nova(remota: str, atual: str = VERSAO) -> bool:
     return _numeros(remota) > _numeros(atual)
+
+
+def versao_em_uso(aplicada: str = "") -> str:
+    """Versão deste programa: a embutida no .exe ou, se maior, a última que o atualizador instalou."""
+    try:
+        if aplicada and _numeros(aplicada) > _numeros(VERSAO):
+            return aplicada.strip()
+    except ErroAtualizacao:
+        pass
+    return VERSAO
+
+
+_MARCA_AUTO_RE = re.compile(r"\[\s*auto(?:m[aá]tic[ao])?\s*\]", re.IGNORECASE)
+
+
+def notas_tem_marca_auto(notas: str) -> bool:
+    return bool(_MARCA_AUTO_RE.search(notas or ""))
+
+
+def limpar_marca_auto(notas: str) -> str:
+    return _MARCA_AUTO_RE.sub("", notas or "").strip()
 
 
 def pode_atualizar() -> bool:
@@ -191,12 +215,12 @@ def _sha256_do_texto(texto: str, nome: str | None = None) -> str:
     return "" if nome else primeira
 
 
-def buscar_atualizacao(repositorio: str) -> Atualizacao | None:
+def buscar_atualizacao(repositorio: str, atual: str = VERSAO) -> Atualizacao | None:
     """Devolve a Release mais nova que a instalada, ou None se já está atualizado."""
     repo = normalizar_repositorio(repositorio)
     dados = _json(f"{API_GITHUB}/repos/{repo}/releases/latest")
     tag = str(dados.get("tag_name") or "")
-    if not versao_mais_nova(tag):
+    if not versao_mais_nova(tag, atual):
         return None
     versao = ".".join(str(n) for n in _numeros(tag)[:3])
 
@@ -237,7 +261,7 @@ def buscar_atualizacao(repositorio: str) -> Atualizacao | None:
     return Atualizacao(
         versao=versao,
         tag=tag,
-        notas=str(dados.get("body") or ""),
+        notas=limpar_marca_auto(str(dados.get("body") or "")),
         nome_pacote=nome,
         url_pacote=str(pacote.get("browser_download_url") or ""),
         tamanho=int(pacote.get("size") or 0),
@@ -246,6 +270,7 @@ def buscar_atualizacao(repositorio: str) -> Atualizacao | None:
         url_manifesto=str((manifesto or {}).get("browser_download_url") or "") if sha_manifesto else "",
         sha256_manifesto=sha_manifesto,
         nome_manifesto=nome_manifesto,
+        automatica=notas_tem_marca_auto(str(dados.get("body") or "")),
     )
 
 
@@ -881,15 +906,19 @@ def iniciar_script(pasta_nova: Path, ambiente_extra: dict[str, str] | None = Non
     )
 
 
-def aplicar_e_reiniciar(pasta_nova: Path) -> None:
-    """Dispara o script de troca e encerra o programa (não retorna se der certo)."""
+def aplicar_e_reiniciar(pasta_nova: Path, versao: str = "") -> None:
+    """Dispara o script de troca e encerra o programa (não retorna se der certo).
+
+    `versao` é repassada ao programa recém-instalado (ATU_VERSAO), que a grava como
+    "última versão aplicada". Se a troca for desfeita, a versão antiga não recebe isso.
+    """
     try:
         import db
 
         db.finalizar_uso()
     except Exception:
         pass
-    processo = iniciar_script(pasta_nova)
+    processo = iniciar_script(pasta_nova, {"ATU_VERSAO": versao} if versao else None)
     # O cliente visual (flet.exe) é filho deste processo e trava arquivos da pasta:
     # encerra-o (menos o script) antes de sair.
     try:
@@ -899,9 +928,17 @@ def aplicar_e_reiniciar(pasta_nova: Path) -> None:
     os._exit(0)
 
 
+def versao_recem_instalada() -> str:
+    """Versão que acabou de ser instalada pelo atualizador ("" se não foi esta abertura)."""
+    if not os.environ.get("ATU_CONFIRMAR"):
+        return ""
+    return os.environ.get("ATU_VERSAO", "").strip()[:40]
+
+
 def confirmar_inicializacao() -> None:
     """Chamado quando a interface abriu: avisa o script que a nova versão está viva."""
     alvo = os.environ.pop("ATU_CONFIRMAR", "")
+    os.environ.pop("ATU_VERSAO", None)
     if alvo:
         try:
             Path(alvo).write_text("ok", encoding="utf-8")

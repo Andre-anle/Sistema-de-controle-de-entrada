@@ -25,6 +25,8 @@ class AppSettings:
     backup_manter: int = 14
     update_auto: bool = True
     update_ignorada: str = ""
+    # Última versão que o atualizador instalou neste computador (guardada antes de reiniciar).
+    update_aplicada: str = ""
 
 
 def _limitar(valor: int, minimo: int, maximo: int) -> int:
@@ -54,6 +56,7 @@ def carregar_config() -> AppSettings:
             backup_manter=_limitar(int(dados.get("backup_manter", 14)), 1, 120),
             update_auto=bool(dados.get("update_auto", True)),
             update_ignorada=str(dados.get("update_ignorada", "")).strip()[:40],
+            update_aplicada=str(dados.get("update_aplicada", "")).strip()[:40],
         )
         if any(chave in dados for chave in CAMPOS_LEGADOS_SENSIVEIS):
             try:

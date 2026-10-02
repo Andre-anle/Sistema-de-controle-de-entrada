@@ -132,7 +132,7 @@ class ConfigMixin:
         porta_input.on_change = atualizar_url
 
         auto_switch = ft.Switch(
-            label="Procurar atualização ao abrir o programa",
+            label="Procurar atualização ao abrir o programa e a cada hora",
             value=self.config.update_auto,
         )
 

@@ -11,11 +11,11 @@ import db
 import logs
 import migracoes
 import validacao
-from atualizador import confirmar_inicializacao
+from atualizador import confirmar_inicializacao, versao_recem_instalada
 from paths import LOGO_PATH, ICONE_PATH
 from print_label import imprimir_etiquetas_produto, impressora_padrao
 from remote_access import aplicar_acesso_remoto, parar_servidor
-from settings import carregar_config
+from settings import carregar_config, salvar_config
 from ui_base import (
     BORDA,
     CARTAO,
@@ -50,6 +50,14 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin, AtualizacaoMixin, Seguran
     def __init__(self, page: ft.Page) -> None:
         self.page = page
         self.config = carregar_config()
+        # Aberto pelo atualizador logo após a troca: registra a versão instalada.
+        instalada = versao_recem_instalada()
+        if instalada and instalada != self.config.update_aplicada:
+            self.config.update_aplicada = instalada
+            try:
+                salvar_config(self.config)
+            except OSError:
+                logs.log("aplicacao").exception("Não foi possível gravar a versão instalada")
         if not self.config.printer:
             self.config.printer = impressora_padrao()
 
@@ -174,8 +182,17 @@ class App(ConsultaMixin, VisitantesMixin, ConfigMixin, AtualizacaoMixin, Seguran
         rodape = ft.Container(
             padding=ft.Padding.only(right=28, bottom=10),
             content=ft.Row(
-                [ft.Text("Feito por: André luiz", size=12, italic=True, color=TEXTO_SUAVE)],
+                [
+                    ft.TextButton(
+                        f"Versão {self.versao_atual()} · Verificar atualização",
+                        icon=ft.Icons.SYSTEM_UPDATE_ALT,
+                        on_click=lambda _: self.verificar_atualizacao(manual=True),
+                    ),
+                    ft.Text("Feito por: André luiz", size=12, italic=True, color=TEXTO_SUAVE),
+                ],
                 alignment=ft.MainAxisAlignment.END,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=16,
             ),
         )
 
